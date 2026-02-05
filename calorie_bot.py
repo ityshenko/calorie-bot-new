@@ -8,8 +8,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     ConversationHandler, ContextTypes, filters
 )
-from flask import Flask
-from threading import Thread
 
 # 🔐 ПОЛУЧАЕМ ТОКЕН ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ (БЕЗОПАСНО!)
 TOKEN = os.getenv('BOT_TOKEN')
@@ -172,32 +170,227 @@ class SimpleCalorieBot:
 bot = SimpleCalorieBot()
 
 # ========== ФУНКЦИИ БОТА ==========
-# [ВСЕ ФУНКЦИИ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ: start, get_weight, get_height, get_age, 
-#  get_gender, main_menu, choose_food, get_grams, help_command, cancel]
-# [Скопируйте их сюда без изменений, как у вас были]
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинаем диалог"""
+    user_id = update.effective_user.id
+    
+    # Проверяем, есть ли пользователь в БД
+    try:
+        bot.cursor.execute('SELECT weight FROM users WHERE user_id=?', (user_id,))
+        user_exists = bot.cursor.fetchone()
+        
+        if user_exists:
+            # Пользователь уже зарегистрирован
+            await update.message.reply_text(
+                "👋 С возвращением! Выберите действие:\n"
+                "📝 Добавить еду\n"
+                "📊 Статистика\n"
+                "⚙️ Изменить данные",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["📝 Добавить еду", "📊 Статистика"], ["⚙️ Изменить данные"]],
+                    resize_keyboard=True
+                )
+            )
+            return MAIN
+    except Exception as e:
+        logger.error(f"Ошибка проверки пользователя: {e}")
+    
+    # Новый пользователь
+    await update.message.reply_text(
+        "🍏 Привет! Я помогу тебе считать калории.\n"
+        "Для начала давай узнаем твои данные.\n"
+        "Сколько ты весишь (в кг)?"
+    )
+    return WEIGHT
 
-# ⚠️ ВАЖНО: Скопируйте сюда ВСЕ ваши функции бота из предыдущего кода
-# от "async def start" до "async def cancel" включительно
-# Я оставил это место для вашего кода функций
+async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем вес"""
+    try:
+        weight = float(update.message.text)
+        if weight < 20 or weight > 300:
+            await update.message.reply_text("❌ Неверный вес! Введи число от 20 до 300 кг:")
+            return WEIGHT
+        
+        context.user_data['weight'] = weight
+        await update.message.reply_text("📏 Какой у тебя рост (в см)?")
+        return HEIGHT
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, например: 70.5")
+        return WEIGHT
 
-# ========== ВАШ КОД ФУНКЦИЙ ЗДЕСЬ ==========
-# [Вставьте сюда ВСЕ ваши функции, начиная с async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):]
-# [и заканчивая async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):]
+async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем рост"""
+    try:
+        height = float(update.message.text)
+        if height < 50 or height > 250:
+            await update.message.reply_text("❌ Неверный рост! Введи число от 50 до 250 см:")
+            return HEIGHT
+        
+        context.user_data['height'] = height
+        await update.message.reply_text("🎂 Сколько тебе лет?")
+        return AGE
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, например: 175")
+        return HEIGHT
 
-# ========== KEEP-ALIVE ДЛЯ RAILWAY ==========
-app_flask = Flask(__name__)
+async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем возраст"""
+    try:
+        age = int(update.message.text)
+        if age < 10 or age > 120:
+            await update.message.reply_text("❌ Неверный возраст! Введи число от 10 до 120:")
+            return AGE
+        
+        context.user_data['age'] = age
+        await update.message.reply_text(
+            "👤 Выбери пол:\n"
+            "мужской\n"
+            "женский",
+            reply_markup=ReplyKeyboardMarkup(
+                [["мужской", "женский"]],
+                resize_keyboard=True
+            )
+        )
+        return GENDER
+    except ValueError:
+        await update.message.reply_text("❌ Введи целое число, например: 25")
+        return AGE
 
-@app_flask.route('/')
-def home():
-    return "🍏 CalorieBot работает! /start в Telegram"
+async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем пол"""
+    gender = update.message.text.lower()
+    if gender not in ['мужской', 'женский']:
+        await update.message.reply_text("❌ Выбери 'мужской' или 'женский'")
+        return GENDER
+    
+    # Сохраняем пользователя
+    user_id = update.effective_user.id
+    weight = context.user_data.get('weight')
+    height = context.user_data.get('height')
+    age = context.user_data.get('age')
+    
+    daily_goal = bot.save_user(user_id, weight, height, age, gender)
+    
+    await update.message.reply_text(
+        f"✅ Отлично! Твоя дневная норма: {daily_goal} ккал\n\n"
+        "Что хочешь сделать?",
+        reply_markup=ReplyKeyboardMarkup(
+            [["📝 Добавить еду", "📊 Статистика"], ["⚙️ Изменить данные"]],
+            resize_keyboard=True
+        )
+    )
+    return MAIN
 
-def run_web_server():
-    """Запуск веб-сервера для Railway"""
-    port = int(os.environ.get('PORT', 8080))
-    app_flask.run(host='0.0.0.0', port=port)
+async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню"""
+    text = update.message.text
+    user_id = update.effective_user.id
+    
+    if text == "📝 Добавить еду":
+        # Показываем список продуктов
+        food_list = "\n".join([f"• {food}" for food in FOODS.keys()])
+        await update.message.reply_text(
+            f"🍎 Выбери продукт из списка:\n\n{food_list}\n\n"
+            "Или напиши название продукта:"
+        )
+        return 'CHOOSE_FOOD'
+    
+    elif text == "📊 Статистика":
+        today_total = bot.get_today_total(user_id)
+        goal = bot.get_goal(user_id)
+        remaining = max(0, goal - today_total)
+        
+        stats = bot.get_month_stats(user_id)
+        stats_text = ""
+        if stats:
+            stats_text = "\n\n📅 За этот месяц:\n"
+            for date, calories in stats[:7]:  # Последние 7 дней
+                stats_text += f"{date}: {calories} ккал\n"
+        
+        await update.message.reply_text(
+            f"📊 Сегодня ты съел(а): {today_total} ккал\n"
+            f"🎯 Цель на день: {goal} ккал\n"
+            f"📉 Осталось: {remaining} ккал"
+            f"{stats_text}"
+        )
+        return MAIN
+    
+    elif text == "⚙️ Изменить данные":
+        await update.message.reply_text("✏️ Введи новый вес (в кг):")
+        return WEIGHT
+    
+    else:
+        await update.message.reply_text("Выбери действие из меню:")
+        return MAIN
 
-def start_bot():
-    """Запуск Telegram бота"""
+async def choose_food(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор продукта"""
+    food = update.message.text.lower()
+    
+    if food not in FOODS:
+        await update.message.reply_text("❌ Такого продукта нет в базе. Попробуй другой:")
+        return 'CHOOSE_FOOD'
+    
+    context.user_data['selected_food'] = food
+    await update.message.reply_text(f"🍎 {food.capitalize()}. Сколько грамм?")
+    return 'GET_GRAMS'
+
+async def get_grams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем количество грамм"""
+    try:
+        grams = int(update.message.text)
+        if grams <= 0 or grams > 5000:
+            await update.message.reply_text("❌ Введи количество от 1 до 5000 грамм:")
+            return 'GET_GRAMS'
+        
+        user_id = update.effective_user.id
+        food = context.user_data.get('selected_food')
+        
+        calories = bot.add_food(user_id, food, grams)
+        
+        if calories:
+            today_total = bot.get_today_total(user_id)
+            goal = bot.get_goal(user_id)
+            
+            await update.message.reply_text(
+                f"✅ Добавлено: {food} - {grams}г ({calories} ккал)\n\n"
+                f"📊 Всего за сегодня: {today_total} / {goal} ккал\n\n"
+                "Что дальше?",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["📝 Добавить еду", "📊 Статистика"], ["⚙️ Изменить данные"]],
+                    resize_keyboard=True
+                )
+            )
+            return MAIN
+        else:
+            await update.message.reply_text("❌ Ошибка добавления. Попробуй еще раз:")
+            return 'CHOOSE_FOOD'
+            
+    except ValueError:
+        await update.message.reply_text("❌ Введи число, например: 150")
+        return 'GET_GRAMS'
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Помощь"""
+    await update.message.reply_text(
+        "🍏 CalorieBot - Помощь:\n\n"
+        "/start - Начать работу с ботом\n"
+        "/help - Показать это сообщение\n"
+        "/cancel - Отменить текущее действие\n\n"
+        "Бот помогает считать калории и следить за питанием!"
+    )
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена"""
+    await update.message.reply_text(
+        "Действие отменено. Используй /start чтобы начать заново.",
+        reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
+    )
+    return ConversationHandler.END
+
+# ========== ЗАПУСК БОТА ==========
+def main():
+    """Главная функция запуска"""
     try:
         application = Application.builder().token(TOKEN).build()
         
@@ -220,20 +413,12 @@ def start_bot():
         application.add_handler(conv_handler)
         application.add_handler(CommandHandler('help', help_command))
         
-        # Запускаем
-        logger.info("🤖 Бот запущен на Railway!")
+        # Запускаем polling
+        logger.info("🤖 Бот запускается...")
         application.run_polling()
+        
     except Exception as e:
         logger.error(f"❌ Ошибка запуска бота: {e}")
-
-def main():
-    """Главная функция запуска"""
-    # Запускаем веб-сервер в отдельном потоке
-    web_thread = Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    
-    # Запускаем бота в основном потоке
-    start_bot()
 
 if __name__ == '__main__':
     main()
